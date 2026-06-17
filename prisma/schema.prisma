@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  AGENT
+}
+
+enum SenderType {
+  CUSTOMER
+  AGENT
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+}
+
+enum AgentStatus {
+  ONLINE
+  OFFLINE
+  ON_BREAK
+}
+
+model User {
+  id                    Int            @id @default(autoincrement())
+  name                  String?
+  username              String         @unique @db.VarChar(20)
+  passwordHash          String
+  role                  Role           @default(AGENT)
+  status                AgentStatus    @default(OFFLINE)
+  lastActiveAt          DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  messages              Message[]
+  assignedConversations Conversation[] @relation("AssignedConversations")
+}
+
+model Customer {
+  id           Int           @id @default(autoincrement())
+  name         String?
+  phone        String        @unique
+  email        String?       @unique
+  tags         String[]  @default([])
+  notes        String?
+  createdAt    DateTime      @default(now())
+  conversation Conversation?
+}
+
+model Conversation {
+  id              Int                @id @default(autoincrement())
+  customerId      Int                @unique
+  customer        Customer           @relation(fields: [customerId], references: [id])
+  assignedAgentId Int?
+  assignedAgent   User?              @relation("AssignedConversations", fields: [assignedAgentId], references: [id])
+  status          ConversationStatus @default(OPEN)
+  unreadCount     Int                @default(0)
+  lastMessage     String?
+  lastMessageAt   DateTime?
+  lastSenderType  SenderType?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  messages        Message[]
+}
+
+model Message {
+  id                Int            @id @default(autoincrement())
+  conversationId    Int
+  conversation      Conversation   @relation(fields: [conversationId], references: [id])
+  senderType        SenderType
+  senderId          Int?
+  sender            User?          @relation(fields: [senderId], references: [id])
+  content           String
+  messageType       MessageType    @default(TEXT)
+  whatsappMessageId String?
+  mediaId           String?
+  mediaUrl          String?
+  status            MessageStatus?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([conversationId, createdAt])
+  @@index([whatsappMessageId])
+}
+
+model AuditLog {
+  id            Int      @id @default(autoincrement())
+  action        String
+  actorId       Int?
+  actorUsername String?
+  targetType    String
+  targetId      Int
+  details       Json?
+  createdAt     DateTime @default(now())
+
+  @@index([targetType, targetId])
+  @@index([actorId])
+  @@index([createdAt])
+}
