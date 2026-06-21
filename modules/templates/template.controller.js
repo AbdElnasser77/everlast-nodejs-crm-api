@@ -292,7 +292,10 @@ const sendTemplate = async (req, res, next) => {
 
     const resolvedBody = resolveVariables(template.body, conversation.customer, req.user);
     const hasButtons = template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0;
-    const messageType = template.approvalStatus === "APPROVED" ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
+    // Only RE_ENGAGEMENT and CAMPAIGN use Meta's template format (outside 24h window)
+    // GENERAL templates always send as regular text/interactive regardless of approval status
+    const needsMetaTemplate = template.category !== "GENERAL" && template.approvalStatus === "APPROVED";
+    const messageType = needsMetaTemplate ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
     const dbMessageType = hasButtons ? "INTERACTIVE" : "TEXT";
 
     // Build template variables (positional, in order: customer_name, agent_name)
