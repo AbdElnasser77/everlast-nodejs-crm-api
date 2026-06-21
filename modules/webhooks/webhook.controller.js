@@ -60,6 +60,7 @@ const MESSAGE_TYPE_MAP = {
   video: "VIDEO",
   audio: "AUDIO",
   document: "DOCUMENT",
+  interactive: "TEXT",
 };
 
 const extractFromPayload = (body) => {
@@ -86,6 +87,8 @@ const extractFromPayload = (body) => {
 
   const content =
     msg.text?.body ||
+    msg.interactive?.button_reply?.title ||
+    msg.interactive?.list_reply?.title ||
     msg.image?.caption ||
     msg.video?.caption ||
     msg.audio?.caption ||
@@ -210,6 +213,7 @@ const receiveWhatsAppMessage = async (req, res, next) => {
         lastMessage: content,
         lastMessageAt: new Date(),
         lastSenderType: "CUSTOMER",
+        lastCustomerMessageAt: new Date(),
       },
     });
 

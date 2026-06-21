@@ -23,6 +23,20 @@ enum MessageType {
   VIDEO
   AUDIO
   DOCUMENT
+  INTERACTIVE
+}
+
+enum TemplateCategory {
+  GENERAL
+  RE_ENGAGEMENT
+  CAMPAIGN
+}
+
+enum TemplateApprovalStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
 }
 
 enum MessageStatus {
@@ -78,9 +92,10 @@ model Conversation {
   assignedAgent   User?              @relation("AssignedConversations", fields: [assignedAgentId], references: [id])
   status          ConversationStatus @default(OPEN)
   unreadCount     Int                @default(0)
-  lastMessage     String?
-  lastMessageAt   DateTime?
-  lastSenderType  SenderType?
+  lastMessage           String?
+  lastMessageAt         DateTime?
+  lastSenderType        SenderType?
+  lastCustomerMessageAt DateTime?
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
   messages        Message[]
@@ -104,6 +119,24 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@index([whatsappMessageId])
+}
+
+model Template {
+  id               Int                    @id @default(autoincrement())
+  name             String
+  metaTemplateName String?
+  metaTemplateId   String?
+  category         TemplateCategory       @default(GENERAL)
+  approvalStatus   TemplateApprovalStatus @default(DRAFT)
+  rejectionReason  String?
+  language         String                 @default("en_US")
+  header           String?
+  body             String
+  footer           String?
+  buttons          Json?
+  isActive         Boolean                @default(true)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
 }
 
 model AuditLog {

@@ -29,6 +29,7 @@ app.use("/api/media", require("./modules/media/media.routes"));
 app.use("/api/webhooks", require("./modules/webhooks/webhook.routes"));
 app.use("/api/audit", require("./modules/audit/audit.routes"));
 app.use("/api/stats", require("./modules/stats/stats.routes"));
+app.use("/api/templates", require("./modules/templates/template.routes"));
 
 app.use(errorHandler);
 
