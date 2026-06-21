@@ -46,13 +46,13 @@ const getConversationMessages = async (req, res, next) => {
     if (!conversation) return next(new AppError("Conversation not found", 404));
 
     const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
     const skip = (page - 1) * limit;
 
     const [messages, total] = await Promise.all([
       prisma.message.findMany({
         where: { conversationId },
-        orderBy: { createdAt: "asc" },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
       }),

@@ -28,6 +28,7 @@ const sendMessage = async (req, res, next) => {
         content: messageContent,
         messageType,
         mediaId: null,
+        mediaUrl: mediaUrl || null,
         whatsappMessageId: null,
         status: "PENDING",
       },
