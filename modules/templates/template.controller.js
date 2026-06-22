@@ -320,6 +320,8 @@ const sendTemplate = async (req, res, next) => {
         content: resolvedBody,
         messageType,
         buttons: hasButtons ? template.buttons : null,
+        header: template.header || null,
+        footer: template.footer || null,
         templateName: template.metaTemplateName,
         language: template.language,
         templateVariables,

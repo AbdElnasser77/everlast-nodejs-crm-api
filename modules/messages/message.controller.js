@@ -18,6 +18,17 @@ const sendMessage = async (req, res, next) => {
     });
     if (!conversation) return next(new AppError("Conversation not found", 404));
 
+    if (conversation.lastCustomerMessageAt) {
+      const elapsed = Date.now() - new Date(conversation.lastCustomerMessageAt).getTime();
+      if (elapsed > 86_400_000) {
+        return res.status(400).json({
+          success: false,
+          error: "WINDOW_CLOSED",
+          message: "The 24-hour messaging window has expired. Use a template to re-engage.",
+        });
+      }
+    }
+
     const messageContent = content || mediaUrl;
 
     let message = await prisma.message.create({

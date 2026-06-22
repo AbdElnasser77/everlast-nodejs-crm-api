@@ -1,6 +1,6 @@
 const axios = require("axios");
 
-const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl = null, buttons = null, templateName = null, language = "en_US", templateVariables = [] }) => {
+const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl = null, buttons = null, header = null, footer = null, templateName = null, language = "en_US", templateVariables = [] }) => {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
@@ -30,7 +30,9 @@ const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl
       payload.type = "interactive";
       payload.interactive = {
         type: "button",
+        ...(header && { header: { type: "text", text: header } }),
         body: { text: content },
+        ...(footer && { footer: { text: footer } }),
         action: {
           buttons: buttons.map((b) => ({
             type: "reply",
