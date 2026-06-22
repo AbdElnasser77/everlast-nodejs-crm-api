@@ -296,7 +296,15 @@ const sendTemplate = async (req, res, next) => {
     // GENERAL templates always send as regular text/interactive regardless of approval status
     const needsMetaTemplate = template.category !== "GENERAL" && template.approvalStatus === "APPROVED";
     const messageType = needsMetaTemplate ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
-    const dbMessageType = hasButtons ? "INTERACTIVE" : "TEXT";
+
+    // Store full template structure as JSON so the frontend can render header/body/footer/buttons
+    const resolvedHeader = template.header ? resolveVariables(template.header, conversation.customer, req.user) : null;
+    const templateContent = JSON.stringify({
+      header: resolvedHeader || undefined,
+      body: resolvedBody,
+      footer: template.footer || undefined,
+      buttons: hasButtons ? template.buttons : undefined,
+    });
 
     // Build template variables (positional, in order: customer_name, agent_name)
     const templateVariables = [];
@@ -308,8 +316,8 @@ const sendTemplate = async (req, res, next) => {
         conversationId,
         senderType: "AGENT",
         senderId: parseInt(req.user.id),
-        content: resolvedBody,
-        messageType: dbMessageType,
+        content: templateContent,
+        messageType: "INTERACTIVE",
         status: "PENDING",
       },
     });
