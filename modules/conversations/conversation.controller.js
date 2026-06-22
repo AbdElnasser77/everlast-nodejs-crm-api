@@ -14,6 +14,7 @@ const getAllConversations = async (req, res, next) => {
     const where = {};
     if (req.query.status) where.status = req.query.status;
     if (req.query.assignedAgentId) where.assignedAgentId = parseInt(req.query.assignedAgentId);
+    if (req.query.lastSenderType) where.lastSenderType = req.query.lastSenderType;
 
     const [conversations, total] = await Promise.all([
       prisma.conversation.findMany({
@@ -160,10 +161,58 @@ const changeConversationStatus = async (req, res, next) => {
   }
 };
 
+const createOrGetConversation = async (req, res, next) => {
+  try {
+    const { customerId } = req.body;
+    if (!customerId) return next(new AppError("customerId is required", 400));
+
+    const customer = await prisma.customer.findUnique({ where: { id: parseInt(customerId) } });
+    if (!customer || customer.isActive === false) return next(new AppError("Customer not found", 404));
+
+    // Return existing conversation if one already exists (1-to-1 constraint)
+    const existing = await prisma.conversation.findUnique({
+      where: { customerId: parseInt(customerId) },
+      include: {
+        customer: { select: { name: true, phone: true } },
+        assignedAgent: { select: { id: true, username: true } },
+      },
+    });
+    if (existing) return res.status(200).json({ success: true, data: existing, created: false });
+
+    // Create fresh conversation
+    const conversation = await prisma.conversation.create({
+      data: {
+        customerId: parseInt(customerId),
+        status: "OPEN",
+        unreadCount: 0,
+      },
+      include: {
+        customer: { select: { name: true, phone: true } },
+        assignedAgent: { select: { id: true, username: true } },
+      },
+    });
+
+    getIO().emit("conversation.created", { conversationId: conversation.id });
+
+    logAudit({
+      action: "conversation.created",
+      actor: req.user,
+      targetType: "conversation",
+      targetId: conversation.id,
+      details: { customerId: conversation.customerId, initiatedBy: "agent" },
+    });
+
+    res.status(201).json({ success: true, data: conversation, created: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAllConversations,
   getConversationMessages,
   markConversationRead,
   assignConversation,
   changeConversationStatus,
+  createOrGetConversation,
 };

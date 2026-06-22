@@ -6,6 +6,7 @@ const {
   markConversationRead,
   assignConversation,
   changeConversationStatus,
+  createOrGetConversation,
 } = require("./conversation.controller");
 
 const router = express.Router();
@@ -13,6 +14,7 @@ const router = express.Router();
 router.use(protect);
 
 router.get("/", getAllConversations);
+router.post("/", createOrGetConversation);
 router.get("/:id/messages", getConversationMessages);
 router.post("/:id/read", markConversationRead);
 router.put("/:id/assign", assignConversation);
