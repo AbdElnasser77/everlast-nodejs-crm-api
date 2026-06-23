@@ -67,7 +67,16 @@ const createCustomer = async (req, res, next) => {
 
 const updateCustomer = async (req, res, next) => {
   try {
+    const id = parseInt(req.params.id);
     const { name, phone, email, tags, notes } = req.body;
+
+    // Validate phone uniqueness before updating
+    if (phone !== undefined) {
+      const conflict = await prisma.customer.findFirst({
+        where: { phone, id: { not: id } },
+      });
+      if (conflict) return next(new AppError("Phone number is already in use by another customer", 409));
+    }
 
     const data = {};
     if (name !== undefined) data.name = name;
@@ -77,13 +86,13 @@ const updateCustomer = async (req, res, next) => {
     if (notes !== undefined) data.notes = notes;
 
     const customer = await prisma.customer.update({
-      where: { id: parseInt(req.params.id) },
+      where: { id },
       data,
     });
     res.status(200).json({ success: true, data: customer });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("Customer not found", 404));
-    if (err.code === "P2002") return next(new AppError("Email already in use", 409));
+    if (err.code === "P2002") return next(new AppError("Phone or email already in use", 409));
     next(err);
   }
 };

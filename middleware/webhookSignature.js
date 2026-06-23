@@ -3,8 +3,7 @@ const AppError = require("../utils/AppError");
 
 const verifyWebhookSignature = (req, res, next) => {
   if (!process.env.WHATSAPP_APP_SECRET) {
-    console.warn("WHATSAPP_APP_SECRET not set — skipping signature verification (dev mode)");
-    return next();
+    return next(new AppError("WHATSAPP_APP_SECRET is not configured — webhook rejected", 500));
   }
 
   const sig = req.headers["x-hub-signature-256"];
@@ -17,7 +16,13 @@ const verifyWebhookSignature = (req, res, next) => {
       .update(req.rawBody)
       .digest("hex");
 
-  if (sig !== expected) return next(new AppError("Invalid webhook signature", 401));
+  // Timing-safe comparison to prevent timing attacks
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expected);
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return next(new AppError("Invalid webhook signature", 401));
+  }
+
   next();
 };
 

@@ -3,6 +3,8 @@ const prisma = require("../../config/prisma");
 const cloudinary = require("../../utils/cloudinary");
 const { getIO } = require("../../utils/socket");
 
+const API_VERSION = process.env.WHATSAPP_API_VERSION || "v19.0";
+
 const CLOUDINARY_RESOURCE_TYPE = {
   IMAGE: "image",
   VIDEO: "video",
@@ -14,7 +16,7 @@ const uploadReceivedMediaToCloudinary = async (messageId, mediaId, messageType) 
   try {
     // 1. Get the temporary download URL from Meta
     const metaRes = await axios.get(
-      `https://graph.facebook.com/v19.0/${mediaId}`,
+      `https://graph.facebook.com/${API_VERSION}/${mediaId}`,
       { headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}` } },
     );
     const downloadUrl = metaRes.data?.url;
@@ -71,8 +73,6 @@ const extractFromPayload = (body) => {
 
   if (!msg) return null;
 
-  // Scenario 1 & 3: phone from msg.from or contact.wa_id
-  // Scenario 2: no phone — use user_id as unique identifier instead
   const phone =
     msg.from ||
     contact?.wa_id ||
@@ -82,7 +82,6 @@ const extractFromPayload = (body) => {
 
   if (!phone) return null;
 
-  // Scenario 1 & 3: use profile.name; Scenario 2: fall back to profile.username
   const name = contact?.profile?.name || contact?.profile?.username || null;
 
   const content =
@@ -147,11 +146,11 @@ const handleStatusUpdate = async (value) => {
   });
 
   console.log(`Webhook: message ${whatsappMessageId} status → ${mapped}`);
-
   getIO().emit("message.status_updated", { messageId: message.id, status: mapped });
 };
 
-const receiveWhatsAppMessage = async (req, res, next) => {
+const receiveWhatsAppMessage = async (req, res) => {
+  // Return 200 immediately — Meta requires a fast response or it will retry
   res.sendStatus(200);
 
   try {
@@ -171,21 +170,30 @@ const receiveWhatsAppMessage = async (req, res, next) => {
     const { phone, name, content, mediaId, messageType, whatsappMessageId } = extracted;
     console.log("Webhook: processing message from", phone, "| type:", messageType);
 
-    let customer = await prisma.customer.findUnique({ where: { phone } });
-    if (!customer) {
-      customer = await prisma.customer.create({ data: { phone, name } });
-      console.log("Webhook: created customer id", customer.id);
-    } else {
-      console.log("Webhook: found customer id", customer.id);
+    // Deduplicate: if we already saved this WhatsApp message ID, skip it
+    if (whatsappMessageId) {
+      const duplicate = await prisma.message.findFirst({ where: { whatsappMessageId } });
+      if (duplicate) {
+        console.log("Webhook: duplicate message ignored, id:", whatsappMessageId);
+        return;
+      }
     }
 
-    let conversation = await prisma.conversation.findUnique({ where: { customerId: customer.id } });
-    if (!conversation) {
-      conversation = await prisma.conversation.create({ data: { customerId: customer.id } });
-      console.log("Webhook: created conversation id", conversation.id);
-    } else {
-      console.log("Webhook: found conversation id", conversation.id);
-    }
+    // Use upsert to avoid race condition when two webhooks arrive simultaneously for the same customer
+    const customer = await prisma.customer.upsert({
+      where: { phone },
+      update: name ? { name } : {},
+      create: { phone, name },
+    });
+    console.log("Webhook: customer id", customer.id);
+
+    // Use upsert to avoid race condition when creating conversation
+    const conversation = await prisma.conversation.upsert({
+      where: { customerId: customer.id },
+      update: {},
+      create: { customerId: customer.id },
+    });
+    console.log("Webhook: conversation id", conversation.id);
 
     const message = await prisma.message.create({
       data: {

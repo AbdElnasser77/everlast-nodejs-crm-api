@@ -7,6 +7,7 @@ const { getIO } = require("../../utils/socket");
 const VALID_CATEGORIES = ["GENERAL", "RE_ENGAGEMENT", "CAMPAIGN"];
 const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"];
 const WINDOW_MS = 24 * 60 * 60 * 1000;
+const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
 
 const validateButtons = (buttons) => {
   if (!buttons) return null;
@@ -180,7 +181,7 @@ const submitForApproval = async (req, res, next) => {
     let metaRes;
     try {
       metaRes = await axios.post(
-        `https://graph.facebook.com/v19.0/${wabaId}/message_templates`,
+        `https://graph.facebook.com/${getApiVersion()}/${wabaId}/message_templates`,
         {
           name: metaName,
           language: template.language,
@@ -229,7 +230,7 @@ const syncApprovalStatus = async (req, res, next) => {
         if (!t.metaTemplateId) return;
         try {
           const metaRes = await axios.get(
-            `https://graph.facebook.com/v19.0/${t.metaTemplateId}`,
+            `https://graph.facebook.com/${getApiVersion()}/${t.metaTemplateId}`,
             { headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}` } },
           );
           const status = metaRes.data?.status;
@@ -292,9 +293,9 @@ const sendTemplate = async (req, res, next) => {
 
     const resolvedBody = resolveVariables(template.body, conversation.customer, req.user);
     const hasButtons = template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0;
-    // Only RE_ENGAGEMENT and CAMPAIGN use Meta's template format (outside 24h window)
+    // Only RE_ENGAGEMENT and CAMPAIGN with a valid metaTemplateName use Meta's template format
     // GENERAL templates always send as regular text/interactive regardless of approval status
-    const needsMetaTemplate = template.category !== "GENERAL" && template.approvalStatus === "APPROVED";
+    const needsMetaTemplate = template.category !== "GENERAL" && template.approvalStatus === "APPROVED" && !!template.metaTemplateName;
     const messageType = needsMetaTemplate ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
 
     // Store full template structure as JSON so the frontend can render header/body/footer/buttons

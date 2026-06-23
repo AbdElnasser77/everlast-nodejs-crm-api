@@ -3,6 +3,8 @@ const http = require("http");
 const app = require("./app");
 const connectDB = require("./config/database");
 const { initSocket } = require("./utils/socket");
+const { startCampaignScheduler } = require("./jobs/campaignScheduler");
+const prisma = require("./config/prisma");
 
 const server = http.createServer(app);
 initSocket(server);
@@ -10,5 +12,27 @@ initSocket(server);
 connectDB().then(() => {
   server.listen(process.env.PORT, () => {
     console.log(`Server running on port ${process.env.PORT}`);
+    startCampaignScheduler();
   });
+});
+
+const shutdown = async (signal) => {
+  console.log(`${signal} received — shutting down gracefully`);
+  server.close(async () => {
+    await prisma.$disconnect();
+    console.log("Database disconnected");
+    process.exit(0);
+  });
+  // Force exit after 10 seconds if graceful shutdown hangs
+  setTimeout(() => {
+    console.error("Forced shutdown after timeout");
+    process.exit(1);
+  }, 10_000).unref();
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Promise Rejection:", reason);
 });

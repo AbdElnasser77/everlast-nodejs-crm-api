@@ -134,7 +134,7 @@ const getMessageMedia = async (req, res, next) => {
     let metaRes;
     try {
       metaRes = await axios.get(
-        `https://graph.facebook.com/v19.0/${message.mediaId}`,
+        `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION || "v19.0"}/${message.mediaId}`,
         { headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}` } },
       );
     } catch (metaErr) {

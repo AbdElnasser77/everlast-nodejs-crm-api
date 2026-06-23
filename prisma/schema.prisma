@@ -59,6 +59,21 @@ enum AgentStatus {
   ON_BREAK
 }
 
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
 model User {
   id                    Int            @id @default(autoincrement())
   name                  String?
@@ -71,17 +86,20 @@ model User {
   updatedAt             DateTime       @updatedAt
   messages              Message[]
   assignedConversations Conversation[] @relation("AssignedConversations")
+  campaigns             Campaign[]
 }
 
 model Customer {
-  id           Int           @id @default(autoincrement())
-  name         String?
-  phone        String        @unique
-  email        String?       @unique
-  tags         String[]  @default([])
-  notes        String?
-  createdAt    DateTime      @default(now())
-  conversation Conversation?
+  id                 Int                 @id @default(autoincrement())
+  name               String?
+  phone              String              @unique
+  email              String?             @unique
+  tags               String[]            @default([])
+  notes              String?
+  optedOut           Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  conversation       Conversation?
+  campaignRecipients CampaignRecipient[]
 }
 
 model Conversation {
@@ -99,6 +117,9 @@ model Conversation {
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
   messages        Message[]
+
+  @@index([lastMessageAt, lastSenderType, status])
+  @@index([assignedAgentId, status])
 }
 
 model Message {
@@ -119,6 +140,7 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@index([whatsappMessageId])
+  @@index([senderType, createdAt])
 }
 
 model Template {
@@ -137,6 +159,39 @@ model Template {
   isActive         Boolean                @default(true)
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
+  campaigns        Campaign[]
+}
+
+model Campaign {
+  id              Int                 @id @default(autoincrement())
+  name            String
+  templateId      Int
+  template        Template            @relation(fields: [templateId], references: [id])
+  status          CampaignStatus      @default(DRAFT)
+  scheduledAt     DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  sentCount       Int                 @default(0)
+  failedCount     Int                 @default(0)
+  totalRecipients Int                 @default(0)
+  createdById     Int
+  createdBy       User                @relation(fields: [createdById], references: [id])
+  recipients      CampaignRecipient[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+}
+
+model CampaignRecipient {
+  id          Int                     @id @default(autoincrement())
+  campaignId  Int
+  campaign    Campaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customerId  Int
+  customer    Customer                @relation(fields: [customerId], references: [id])
+  status      CampaignRecipientStatus @default(PENDING)
+  messageId   Int?
+  error       String?
+  sentAt      DateTime?
+  createdAt   DateTime                @default(now())
 }
 
 model AuditLog {
