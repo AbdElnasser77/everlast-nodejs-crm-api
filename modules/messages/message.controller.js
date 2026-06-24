@@ -6,7 +6,7 @@ const { getIO } = require("../../utils/socket");
 
 const sendMessage = async (req, res, next) => {
   try {
-    const { conversationId, content, messageType = "TEXT", mediaUrl = null } = req.body;
+    const { conversationId, content, messageType = "TEXT", mediaUrl = null, quotedMessageId } = req.body;
 
     if (!conversationId) return next(new AppError("conversationId is required", 400));
     if (messageType === "TEXT" && !content) return next(new AppError("content is required for text messages", 400));
@@ -31,6 +31,15 @@ const sendMessage = async (req, res, next) => {
 
     const messageContent = content || mediaUrl;
 
+    let quotedWhatsappMessageId = null;
+    if (quotedMessageId) {
+      const quoted = await prisma.message.findUnique({
+        where: { id: parseInt(quotedMessageId) },
+        select: { whatsappMessageId: true },
+      });
+      quotedWhatsappMessageId = quoted?.whatsappMessageId ?? null;
+    }
+
     let message = await prisma.message.create({
       data: {
         conversationId: parseInt(conversationId),
@@ -42,6 +51,12 @@ const sendMessage = async (req, res, next) => {
         mediaUrl: mediaUrl || null,
         whatsappMessageId: null,
         status: "PENDING",
+        ...(quotedMessageId ? { quotedMessageId: parseInt(quotedMessageId) } : {}),
+      },
+      include: {
+        quotedMessage: {
+          select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+        },
       },
     });
 
@@ -51,10 +66,16 @@ const sendMessage = async (req, res, next) => {
         content,
         messageType,
         mediaUrl,
+        quotedWhatsappMessageId,
       });
       message = await prisma.message.update({
         where: { id: message.id },
         data: { whatsappMessageId, status: "SENT" },
+        include: {
+          quotedMessage: {
+            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+          },
+        },
       });
     } catch (waErr) {
       const errDetail = waErr.response?.data || waErr.message;
@@ -62,6 +83,11 @@ const sendMessage = async (req, res, next) => {
       message = await prisma.message.update({
         where: { id: message.id },
         data: { status: "FAILED" },
+        include: {
+          quotedMessage: {
+            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+          },
+        },
       });
     }
 

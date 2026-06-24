@@ -53,6 +53,11 @@ const getConversationMessages = async (req, res, next) => {
     const [messages, total] = await Promise.all([
       prisma.message.findMany({
         where: { conversationId },
+        include: {
+          quotedMessage: {
+            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+          },
+        },
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,

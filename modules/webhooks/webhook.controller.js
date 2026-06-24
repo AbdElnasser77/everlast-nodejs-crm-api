@@ -10,6 +10,7 @@ const CLOUDINARY_RESOURCE_TYPE = {
   VIDEO: "video",
   AUDIO: "video", // Cloudinary uses "video" for audio
   DOCUMENT: "raw",
+  STICKER: "image", // WebP stickers are images
 };
 
 const uploadReceivedMediaToCloudinary = async (messageId, mediaId, messageType) => {
@@ -30,9 +31,14 @@ const uploadReceivedMediaToCloudinary = async (messageId, mediaId, messageType) 
 
     // 3. Upload stream directly to Cloudinary
     const resourceType = CLOUDINARY_RESOURCE_TYPE[messageType] || "raw";
+    const uploadOptions = { resource_type: resourceType, folder: "everlast-crm/received" };
+    if (messageType === "STICKER") {
+      uploadOptions.flags = ["animated"];
+      uploadOptions.format = "webp";
+    }
     const cloudinaryResult = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
-        { resource_type: resourceType, folder: "everlast-crm/received" },
+        uploadOptions,
         (err, result) => (err ? reject(err) : resolve(result)),
       );
       fileRes.data.pipe(uploadStream);
@@ -63,6 +69,7 @@ const MESSAGE_TYPE_MAP = {
   audio: "AUDIO",
   document: "DOCUMENT",
   interactive: "TEXT",
+  sticker: "STICKER",
 };
 
 const extractFromPayload = (body) => {
@@ -92,6 +99,7 @@ const extractFromPayload = (body) => {
     msg.video?.caption ||
     msg.audio?.caption ||
     msg.document?.caption ||
+    (msg.type === "sticker" ? "[sticker]" : null) ||
     "[media message]";
 
   const mediaId =
@@ -99,7 +107,11 @@ const extractFromPayload = (body) => {
     msg.video?.id ||
     msg.audio?.id ||
     msg.document?.id ||
+    msg.sticker?.id ||
     null;
+
+  // WA ID of the message being quoted (present when customer replies to a specific message)
+  const quotedWhatsappMessageId = msg.context?.id || null;
 
   return {
     phone,
@@ -108,6 +120,7 @@ const extractFromPayload = (body) => {
     mediaId,
     messageType: MESSAGE_TYPE_MAP[msg.type] || "TEXT",
     whatsappMessageId: msg.id,
+    quotedWhatsappMessageId,
   };
 };
 
@@ -149,6 +162,33 @@ const handleStatusUpdate = async (value) => {
   getIO().emit("message.status_updated", { messageId: message.id, status: mapped });
 };
 
+const handleReaction = async (value) => {
+  const msg = value?.messages?.[0];
+  if (!msg || msg.type !== "reaction") return;
+
+  const { message_id: targetWaId, emoji } = msg.reaction;
+
+  const target = await prisma.message.findFirst({ where: { whatsappMessageId: targetWaId } });
+  if (!target) {
+    console.log("Webhook: reaction target not found, skipping");
+    return;
+  }
+
+  // reactions stored as { "👍": count, "❤️": count, ... }
+  const reactions = (target.reactions && typeof target.reactions === "object") ? { ...target.reactions } : {};
+
+  if (emoji) {
+    reactions[emoji] = (reactions[emoji] || 0) + 1;
+    console.log(`Webhook: reaction ${emoji} on message ${target.id}`);
+  } else {
+    // Empty emoji = customer removed their reaction — no per-sender tracking, so skip decrement
+    console.log(`Webhook: reaction removed on message ${target.id} (skipped)`);
+  }
+
+  await prisma.message.update({ where: { id: target.id }, data: { reactions } });
+  getIO().emit("message.reaction", { messageId: target.id, reactions });
+};
+
 const receiveWhatsAppMessage = async (req, res) => {
   // Return 200 immediately — Meta requires a fast response or it will retry
   res.sendStatus(200);
@@ -161,13 +201,19 @@ const receiveWhatsAppMessage = async (req, res) => {
       return;
     }
 
+    // Reaction webhooks: type === "reaction" inside messages array
+    if (value?.messages?.[0]?.type === "reaction") {
+      await handleReaction(value);
+      return;
+    }
+
     const extracted = extractFromPayload(req.body);
     if (!extracted) {
       console.log("Webhook: no message extracted from payload — skipping");
       return;
     }
 
-    const { phone, name, content, mediaId, messageType, whatsappMessageId } = extracted;
+    const { phone, name, content, mediaId, messageType, whatsappMessageId, quotedWhatsappMessageId } = extracted;
     console.log("Webhook: processing message from", phone, "| type:", messageType);
 
     // Deduplicate: if we already saved this WhatsApp message ID, skip it
@@ -195,6 +241,13 @@ const receiveWhatsAppMessage = async (req, res) => {
     });
     console.log("Webhook: conversation id", conversation.id);
 
+    // Resolve quoted message: look up by WA ID to get our local DB id
+    let quotedMessageId = null;
+    if (quotedWhatsappMessageId) {
+      const quoted = await prisma.message.findFirst({ where: { whatsappMessageId: quotedWhatsappMessageId } });
+      quotedMessageId = quoted?.id ?? null;
+    }
+
     const message = await prisma.message.create({
       data: {
         conversationId: conversation.id,
@@ -204,10 +257,11 @@ const receiveWhatsAppMessage = async (req, res) => {
         messageType,
         mediaId,
         whatsappMessageId,
+        quotedMessageId,
         status: null,
       },
     });
-    console.log("Webhook: saved message id", message.id);
+    console.log("Webhook: saved message id", message.id, quotedMessageId ? `(reply to ${quotedMessageId})` : "");
 
     // Fire-and-forget: upload media to Cloudinary in background
     if (mediaId) {

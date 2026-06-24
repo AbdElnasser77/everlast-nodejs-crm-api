@@ -1,3 +1,4 @@
+const { parse } = require("csv-parse/sync");
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 
@@ -97,4 +98,89 @@ const updateCustomer = async (req, res, next) => {
   }
 };
 
-module.exports = { getAllCustomers, getCustomerById, createCustomer, updateCustomer };
+const importCustomers = async (req, res, next) => {
+  try {
+    if (!req.file) return next(new AppError("CSV file is required", 400));
+
+    let rows;
+    try {
+      rows = parse(req.file.buffer, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        bom: true, // handle Excel-exported CSVs with BOM
+      });
+    } catch {
+      return next(new AppError("Invalid CSV format", 400));
+    }
+
+    if (rows.length === 0) return next(new AppError("CSV file is empty", 400));
+    if (rows.length > 5000) return next(new AppError("CSV cannot exceed 5000 rows per import", 400));
+
+    let created = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 2; // +2 because row 1 is the header
+
+      const phone = row.phone?.trim();
+      if (!phone) {
+        errors.push({ row: rowNum, reason: "Missing phone number" });
+        continue;
+      }
+
+      // Parse tags: support "tag1,tag2" or "tag1;tag2"
+      let tags = [];
+      if (row.tags) {
+        const delimiter = row.tags.includes(";") ? ";" : ",";
+        tags = row.tags.split(delimiter).map((t) => t.trim()).filter(Boolean);
+      }
+
+      try {
+        await prisma.customer.create({
+          data: {
+            name: row.name?.trim() || null,
+            phone,
+            email: row.email?.trim() || null,
+            tags,
+            notes: row.notes?.trim() || null,
+          },
+        });
+        created++;
+      } catch (err) {
+        if (err.code === "P2002") {
+          skipped++; // duplicate phone or email — skip silently
+        } else {
+          errors.push({ row: rowNum, phone, reason: err.message });
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: { created, skipped, errors, total: rows.length },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const deleteCustomer = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id);
+    await prisma.$transaction([
+      prisma.message.deleteMany({ where: { conversation: { customerId: id } } }),
+      prisma.conversation.deleteMany({ where: { customerId: id } }),
+      prisma.campaignRecipient.deleteMany({ where: { customerId: id } }),
+      prisma.customer.delete({ where: { id } }),
+    ]);
+    res.status(200).json({ success: true, message: "Customer deleted" });
+  } catch (err) {
+    if (err.code === "P2025") return next(new AppError("Customer not found", 404));
+    next(err);
+  }
+};
+
+module.exports = { getAllCustomers, getCustomerById, createCustomer, updateCustomer, importCustomers, deleteCustomer };

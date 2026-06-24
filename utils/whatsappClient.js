@@ -2,7 +2,7 @@ const axios = require("axios");
 
 const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
 
-const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl = null, buttons = null, header = null, footer = null, templateName = null, language = "en_US", templateVariables = [] }) => {
+const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl = null, buttons = null, header = null, footer = null, templateName = null, language = "en_US", templateVariables = [], quotedWhatsappMessageId = null }) => {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
@@ -10,6 +10,7 @@ const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl
     messaging_product: "whatsapp",
     to,
     type: messageType.toLowerCase(),
+    ...(quotedWhatsappMessageId ? { context: { message_id: quotedWhatsappMessageId } } : {}),
   };
 
   switch (messageType) {
