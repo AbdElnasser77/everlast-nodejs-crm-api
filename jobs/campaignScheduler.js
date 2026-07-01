@@ -3,6 +3,26 @@ const prisma = require("../config/prisma");
 const { processCampaign } = require("../modules/campaigns/campaign.controller");
 
 function startCampaignScheduler() {
+  // Recover campaigns left in RUNNING by a crash/restart. processCampaign only
+  // sends to recipients still marked PENDING, so resuming is safe and idempotent.
+  // NOTE: assumes a single server instance (as does node-cron below).
+  (async () => {
+    try {
+      const stuck = await prisma.campaign.findMany({
+        where: { status: "RUNNING" },
+        select: { id: true },
+      });
+      for (const c of stuck) {
+        console.log(`[Scheduler] Resuming interrupted campaign ${c.id}`);
+        processCampaign(c.id).catch((err) =>
+          console.error(`[Scheduler] Resume of campaign ${c.id} failed:`, err.message)
+        );
+      }
+    } catch (err) {
+      console.error("[Scheduler] Failed to recover running campaigns:", err.message);
+    }
+  })();
+
   cron.schedule("* * * * *", async () => {
     try {
       const due = await prisma.campaign.findMany({

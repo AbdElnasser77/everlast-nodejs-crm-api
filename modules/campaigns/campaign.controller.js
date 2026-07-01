@@ -3,17 +3,9 @@ const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { getIO } = require("../../utils/socket");
+const { buildTemplateParams, resolveNamedVars } = require("../../utils/templateVars");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const resolveVariables = (text, customer) => {
-  if (!text) return text;
-  const firstName = customer?.name ? customer.name.split(" ")[0] : "Customer";
-  return text
-    .replace(/\{\{first_name\}\}/g, firstName)
-    .replace(/\{\{customer_name\}\}/g, customer?.name || "Customer")
-    .replace(/\{\{agent_name\}\}/g, "Team");
-};
 
 // ── Exported for scheduler ──────────────────────────────────────────────────
 
@@ -33,6 +25,18 @@ async function processCampaign(campaignId) {
   getIO().emit("campaign.started", { campaignId });
 
   for (const recipient of campaign.recipients) {
+    // Stop immediately if the campaign was cancelled mid-run. Without this the
+    // loop would keep sending and then overwrite CANCELLED with COMPLETED.
+    const current = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: { status: true },
+    });
+    if (!current || current.status === "CANCELLED") {
+      console.log(`[Campaign ${campaignId}] Cancelled — stopping send loop`);
+      getIO().emit("campaign.cancelled", { campaignId });
+      return;
+    }
+
     try {
       if (recipient.customer.optedOut) {
         await prisma.campaignRecipient.update({
@@ -58,8 +62,8 @@ async function processCampaign(campaignId) {
       const template = campaign.template;
       const customer = recipient.customer;
 
-      const resolvedBody = resolveVariables(template.body, customer);
-      const resolvedHeader = template.header ? resolveVariables(template.header, customer) : null;
+      const resolvedBody = resolveNamedVars(template.body, customer, null);
+      const resolvedHeader = template.header ? resolveNamedVars(template.header, customer, null) : null;
       const hasButtons = template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0;
       const needsMetaTemplate = template.category !== "GENERAL" && template.approvalStatus === "APPROVED" && !!template.metaTemplateName;
       const messageType = needsMetaTemplate ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
@@ -71,10 +75,8 @@ async function processCampaign(campaignId) {
         buttons: hasButtons ? template.buttons : undefined,
       });
 
-      const templateVariables = [];
-      if (template.body.includes("{{first_name}}")) templateVariables.push(customer?.name?.split(" ")[0] || "Customer");
-      if (template.body.includes("{{customer_name}}")) templateVariables.push(customer?.name || "Customer");
-      if (template.body.includes("{{agent_name}}")) templateVariables.push("Team");
+      // Positional params matching the submitted Meta template (order of appearance).
+      const templateVariables = buildTemplateParams(template.body, customer, null);
 
       let message = await prisma.message.create({
         data: {
@@ -145,11 +147,15 @@ async function processCampaign(campaignId) {
     await sleep(400);
   }
 
-  await prisma.campaign.update({
-    where: { id: campaignId },
+  // Only mark COMPLETED if still RUNNING — a cancel that landed after the last
+  // iteration's check must not be overwritten.
+  const finished = await prisma.campaign.updateMany({
+    where: { id: campaignId, status: "RUNNING" },
     data: { status: "COMPLETED", completedAt: new Date() },
   });
-  getIO().emit("campaign.completed", { campaignId });
+  if (finished.count > 0) {
+    getIO().emit("campaign.completed", { campaignId });
+  }
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────

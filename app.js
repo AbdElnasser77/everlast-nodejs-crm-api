@@ -2,11 +2,16 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./config/swagger");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
+
+// Security headers. CSP is disabled because this process serves a JSON API
+// (and Swagger UI, which needs inline assets), not first-party HTML pages.
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
 
 app.use(cors({
   origin: process.env.FRONTEND_URL || "http://localhost:3000",
@@ -35,9 +40,13 @@ const webhookLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  swaggerOptions: { persistAuthorization: true },
-}));
+// Only expose API docs outside production — they describe every endpoint and
+// shouldn't be publicly browsable on the live server.
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+    swaggerOptions: { persistAuthorization: true },
+  }));
+}
 
 app.use("/api/auth", authLimiter, require("./modules/auth/auth.routes"));
 app.use("/api/users", require("./modules/users/user.routes"));

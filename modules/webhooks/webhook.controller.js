@@ -189,6 +189,16 @@ const handleReaction = async (value) => {
   getIO().emit("message.reaction", { messageId: target.id, reactions });
 };
 
+// WhatsApp opt-out compliance: honor STOP/START style keywords from customers.
+const OPT_OUT_KEYWORDS = new Set(["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "QUIT", "END"]);
+const OPT_IN_KEYWORDS = new Set(["START", "UNSTOP", "SUBSCRIBE", "RESUME"]);
+const detectOptIntent = (content) => {
+  const word = (content || "").trim().toUpperCase();
+  if (OPT_OUT_KEYWORDS.has(word)) return "OUT";
+  if (OPT_IN_KEYWORDS.has(word)) return "IN";
+  return null;
+};
+
 const receiveWhatsAppMessage = async (req, res) => {
   // Return 200 immediately — Meta requires a fast response or it will retry
   res.sendStatus(200);
@@ -214,7 +224,7 @@ const receiveWhatsAppMessage = async (req, res) => {
     }
 
     const { phone, name, content, mediaId, messageType, whatsappMessageId, quotedWhatsappMessageId } = extracted;
-    console.log("Webhook: processing message from", phone, "| type:", messageType);
+    console.log("Webhook: processing inbound message | type:", messageType);
 
     // Deduplicate: if we already saved this WhatsApp message ID, skip it
     if (whatsappMessageId) {
@@ -232,6 +242,16 @@ const receiveWhatsAppMessage = async (req, res) => {
       create: { phone, name },
     });
     console.log("Webhook: customer id", customer.id);
+
+    // Honor opt-out / opt-in keywords (STOP / START, etc.) from the customer.
+    const optIntent = messageType === "TEXT" ? detectOptIntent(content) : null;
+    if (optIntent === "OUT" && !customer.optedOut) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { optedOut: true } });
+      console.log("Webhook: customer", customer.id, "opted OUT via keyword");
+    } else if (optIntent === "IN" && customer.optedOut) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { optedOut: false } });
+      console.log("Webhook: customer", customer.id, "opted IN via keyword");
+    }
 
     // Use upsert to avoid race condition when creating conversation
     const conversation = await prisma.conversation.upsert({

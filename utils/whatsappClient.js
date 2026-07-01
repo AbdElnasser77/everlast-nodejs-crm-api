@@ -61,7 +61,11 @@ const sendWhatsAppMessage = async ({ to, content, messageType = "TEXT", mediaUrl
   const response = await axios.post(
     `https://graph.facebook.com/${getApiVersion()}/${phoneNumberId}/messages`,
     payload,
-    { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } },
+    {
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      // Fail fast instead of letting one hung request stall the whole campaign loop.
+      timeout: 30_000,
+    },
   );
 
   const whatsappMessageId = response.data?.messages?.[0]?.id;

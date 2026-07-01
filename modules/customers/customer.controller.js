@@ -69,7 +69,7 @@ const createCustomer = async (req, res, next) => {
 const updateCustomer = async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);
-    const { name, phone, email, tags, notes } = req.body;
+    const { name, phone, email, tags, notes, optedOut } = req.body;
 
     // Validate phone uniqueness before updating
     if (phone !== undefined) {
@@ -85,6 +85,7 @@ const updateCustomer = async (req, res, next) => {
     if (email !== undefined) data.email = email;
     if (tags !== undefined) data.tags = Array.isArray(tags) ? tags : [];
     if (notes !== undefined) data.notes = notes;
+    if (optedOut !== undefined) data.optedOut = Boolean(optedOut);
 
     const customer = await prisma.customer.update({
       where: { id },

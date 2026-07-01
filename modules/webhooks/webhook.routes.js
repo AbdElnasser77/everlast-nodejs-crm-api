@@ -5,11 +5,8 @@ const { verifyWebhook, receiveWhatsAppMessage } = require("./webhook.controller"
 const router = express.Router();
 
 router.get("/whatsapp/messages", verifyWebhook);
-router.post("/whatsapp/messages", (req, res, next) => {
-  console.log("=== WEBHOOK HIT ===");
-  console.log("Headers:", JSON.stringify(req.headers, null, 2));
-  console.log("Body:", JSON.stringify(req.body, null, 2));
-  next();
-}, verifyWebhookSignature, receiveWhatsAppMessage);
+// Do NOT log raw headers/body here — the payload contains customer PII (message
+// content, phone numbers). Signature verification runs before the handler.
+router.post("/whatsapp/messages", verifyWebhookSignature, receiveWhatsAppMessage);
 
 module.exports = router;

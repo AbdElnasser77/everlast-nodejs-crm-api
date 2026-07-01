@@ -3,6 +3,7 @@ const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 const { sendWhatsAppMessage } = require("../../utils/whatsappClient");
 const { getIO } = require("../../utils/socket");
+const { toMetaPositionalBody, buildTemplateParams, resolveNamedVars } = require("../../utils/templateVars");
 
 const VALID_CATEGORIES = ["GENERAL", "RE_ENGAGEMENT", "CAMPAIGN"];
 const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"];
@@ -22,13 +23,6 @@ const validateButtons = (buttons) => {
 
 const toMetaName = (name) =>
   name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-
-const resolveVariables = (text, customer, agent) => {
-  if (!text) return text;
-  return text
-    .replace(/\{\{customer_name\}\}/g, customer?.name || "Customer")
-    .replace(/\{\{agent_name\}\}/g, agent?.name || agent?.username || "Agent");
-};
 
 const getTemplates = async (req, res, next) => {
   try {
@@ -160,12 +154,15 @@ const submitForApproval = async (req, res, next) => {
       components.push({ type: "HEADER", format: "TEXT", text: template.header });
     }
 
-    // Convert {{customer_name}} style placeholders to {{1}}, {{2}} for Meta
-    let metaBody = template.body;
-    let paramIndex = 1;
-    metaBody = metaBody.replace(/\{\{customer_name\}\}/g, () => `{{${paramIndex++}}}`);
-    metaBody = metaBody.replace(/\{\{agent_name\}\}/g, () => `{{${paramIndex++}}}`);
-    components.push({ type: "BODY", text: metaBody });
+    // Convert named placeholders to Meta positional {{1}},{{2}} (by order of
+    // appearance) and attach example values so Meta can validate on submit.
+    const metaBody = toMetaPositionalBody(template.body);
+    const bodyComponent = { type: "BODY", text: metaBody };
+    const sampleParams = buildTemplateParams(template.body, { name: "Sarah Ahmed" }, { name: "Alex" });
+    if (sampleParams.length > 0) {
+      bodyComponent.example = { body_text: [sampleParams] };
+    }
+    components.push(bodyComponent);
 
     if (template.footer) {
       components.push({ type: "FOOTER", text: template.footer });
@@ -291,7 +288,7 @@ const sendTemplate = async (req, res, next) => {
       }
     }
 
-    const resolvedBody = resolveVariables(template.body, conversation.customer, req.user);
+    const resolvedBody = resolveNamedVars(template.body, conversation.customer, req.user);
     const hasButtons = template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0;
     // Only RE_ENGAGEMENT and CAMPAIGN with a valid metaTemplateName use Meta's template format
     // GENERAL templates always send as regular text/interactive regardless of approval status
@@ -299,7 +296,7 @@ const sendTemplate = async (req, res, next) => {
     const messageType = needsMetaTemplate ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
 
     // Store full template structure as JSON so the frontend can render header/body/footer/buttons
-    const resolvedHeader = template.header ? resolveVariables(template.header, conversation.customer, req.user) : null;
+    const resolvedHeader = template.header ? resolveNamedVars(template.header, conversation.customer, req.user) : null;
     const templateContent = JSON.stringify({
       header: resolvedHeader || undefined,
       body: resolvedBody,
@@ -307,10 +304,8 @@ const sendTemplate = async (req, res, next) => {
       buttons: hasButtons ? template.buttons : undefined,
     });
 
-    // Build template variables (positional, in order: customer_name, agent_name)
-    const templateVariables = [];
-    if (template.body.includes("{{customer_name}}")) templateVariables.push(conversation.customer?.name || "Customer");
-    if (template.body.includes("{{agent_name}}")) templateVariables.push(req.user?.name || req.user?.username || "Agent");
+    // Positional params matching the submitted template (order of appearance).
+    const templateVariables = buildTemplateParams(template.body, conversation.customer, req.user);
 
     let message = await prisma.message.create({
       data: {
