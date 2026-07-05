@@ -184,4 +184,30 @@ const deleteCustomer = async (req, res, next) => {
   }
 };
 
-module.exports = { getAllCustomers, getCustomerById, createCustomer, updateCustomer, importCustomers, deleteCustomer };
+// Delete many customers at once. Mirrors deleteCustomer's cascade, generalised
+// with `{ in: ids }`. Capped at 5000 per request to match the import limit and
+// keep the transaction bounded. Missing ids are ignored (deleteMany, not delete).
+const bulkDeleteCustomers = async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return next(new AppError("Provide a non-empty array of customer ids", 400));
+    }
+    const parsed = [...new Set(ids.map((n) => parseInt(n)).filter((n) => Number.isInteger(n)))];
+    if (parsed.length === 0) return next(new AppError("No valid customer ids provided", 400));
+    if (parsed.length > 5000) return next(new AppError("Cannot delete more than 5000 customers per request", 400));
+
+    const results = await prisma.$transaction([
+      prisma.message.deleteMany({ where: { conversation: { customerId: { in: parsed } } } }),
+      prisma.conversation.deleteMany({ where: { customerId: { in: parsed } } }),
+      prisma.campaignRecipient.deleteMany({ where: { customerId: { in: parsed } } }),
+      prisma.customer.deleteMany({ where: { id: { in: parsed } } }),
+    ]);
+    const deleted = results[results.length - 1].count;
+    res.status(200).json({ success: true, message: `Deleted ${deleted} customer(s)`, data: { deleted } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getAllCustomers, getCustomerById, createCustomer, updateCustomer, importCustomers, deleteCustomer, bulkDeleteCustomers };

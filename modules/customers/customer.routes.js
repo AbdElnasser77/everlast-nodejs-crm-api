@@ -2,7 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const protect = require("../../middleware/auth");
 const requireRole = require("../../middleware/roles");
-const { getAllCustomers, getCustomerById, createCustomer, updateCustomer, importCustomers, deleteCustomer } = require("./customer.controller");
+const { getAllCustomers, getCustomerById, createCustomer, updateCustomer, importCustomers, deleteCustomer, bulkDeleteCustomers } = require("./customer.controller");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -22,6 +22,7 @@ router.use(protect);
 
 router.get("/", getAllCustomers);
 router.post("/import", requireRole("ADMIN"), upload.single("file"), importCustomers);
+router.post("/bulk-delete", requireRole("ADMIN"), bulkDeleteCustomers);
 router.get("/:id", getCustomerById);
 router.post("/", createCustomer);
 router.put("/:id", updateCustomer);
