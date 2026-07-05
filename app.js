@@ -9,6 +9,11 @@ const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
 
+// Behind a reverse proxy / tunnel (serveo, nginx, Caddy) that sets X-Forwarded-For.
+// Trust exactly ONE proxy hop so express-rate-limit can identify the real client IP.
+// Do NOT use `true` (trust all) — clients could spoof X-Forwarded-For to dodge rate limits.
+app.set("trust proxy", 1);
+
 // Security headers. CSP is disabled because this process serves a JSON API
 // (and Swagger UI, which needs inline assets), not first-party HTML pages.
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));

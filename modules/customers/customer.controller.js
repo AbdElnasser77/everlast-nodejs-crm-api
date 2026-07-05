@@ -2,6 +2,31 @@ const { parse } = require("csv-parse/sync");
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
 
+// ─── Patient field parsers ────────────────────────────────────────────────────
+
+// Normalise gender input to the Prisma enum (MALE | FEMALE), or null.
+function parseGender(value) {
+  if (value == null || value === "") return null;
+  const v = String(value).trim().toLowerCase();
+  if (v === "male" || v === "m") return "MALE";
+  if (v === "female" || v === "f") return "FEMALE";
+  return undefined; // signal invalid
+}
+
+// Parse a date-only value (YYYY-MM-DD or any Date-parseable string) to a Date, or null.
+function parseDate(value) {
+  if (value == null || value === "") return null;
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return undefined; // signal invalid
+  return d;
+}
+
+// Coerce departments/tags into a trimmed string array.
+function toStringArray(value) {
+  if (Array.isArray(value)) return value.map((s) => String(s).trim()).filter(Boolean);
+  return [];
+}
+
 const getAllCustomers = async (req, res, next) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -14,6 +39,7 @@ const getAllCustomers = async (req, res, next) => {
         { name: { contains: req.query.search, mode: "insensitive" } },
         { phone: { contains: req.query.search, mode: "insensitive" } },
         { email: { contains: req.query.search, mode: "insensitive" } },
+        { chartNumber: { contains: req.query.search, mode: "insensitive" } },
       ];
     }
 
@@ -44,8 +70,15 @@ const getCustomerById = async (req, res, next) => {
 
 const createCustomer = async (req, res, next) => {
   try {
-    const { name, phone, email, tags, notes } = req.body;
+    const { name, phone, email, tags, notes, chartNumber, nationality, gender, dateOfBirth, joinDate, departments } = req.body;
     if (!phone) return next(new AppError("Phone number is required", 400));
+
+    const genderVal = parseGender(gender);
+    if (genderVal === undefined) return next(new AppError("Gender must be 'Male' or 'Female'", 400));
+    const dob = parseDate(dateOfBirth);
+    if (dob === undefined) return next(new AppError("Invalid date of birth", 400));
+    const join = parseDate(joinDate);
+    if (join === undefined) return next(new AppError("Invalid join date", 400));
 
     const existing = await prisma.customer.findUnique({ where: { phone } });
     if (existing) return next(new AppError("Customer with this phone already exists", 409));
@@ -55,13 +88,22 @@ const createCustomer = async (req, res, next) => {
         name,
         phone,
         email: email || null,
+        chartNumber: chartNumber?.trim() || null,
+        nationality: nationality?.trim() || null,
+        gender: genderVal,
+        dateOfBirth: dob,
+        joinDate: join,
+        departments: toStringArray(departments),
         tags: Array.isArray(tags) ? tags : [],
         notes: notes || null,
       },
     });
     res.status(201).json({ success: true, data: customer });
   } catch (err) {
-    if (err.code === "P2002") return next(new AppError("Email already in use", 409));
+    if (err.code === "P2002") {
+      const target = err.meta?.target?.join?.(", ") || "field";
+      return next(new AppError(`A customer with this ${target} already exists`, 409));
+    }
     next(err);
   }
 };
@@ -69,7 +111,7 @@ const createCustomer = async (req, res, next) => {
 const updateCustomer = async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);
-    const { name, phone, email, tags, notes, optedOut } = req.body;
+    const { name, phone, email, tags, notes, optedOut, chartNumber, nationality, gender, dateOfBirth, joinDate, departments } = req.body;
 
     // Validate phone uniqueness before updating
     if (phone !== undefined) {
@@ -83,6 +125,24 @@ const updateCustomer = async (req, res, next) => {
     if (name !== undefined) data.name = name;
     if (phone !== undefined) data.phone = phone;
     if (email !== undefined) data.email = email;
+    if (chartNumber !== undefined) data.chartNumber = chartNumber?.trim() || null;
+    if (nationality !== undefined) data.nationality = nationality?.trim() || null;
+    if (gender !== undefined) {
+      const genderVal = parseGender(gender);
+      if (genderVal === undefined) return next(new AppError("Gender must be 'Male' or 'Female'", 400));
+      data.gender = genderVal;
+    }
+    if (dateOfBirth !== undefined) {
+      const dob = parseDate(dateOfBirth);
+      if (dob === undefined) return next(new AppError("Invalid date of birth", 400));
+      data.dateOfBirth = dob;
+    }
+    if (joinDate !== undefined) {
+      const join = parseDate(joinDate);
+      if (join === undefined) return next(new AppError("Invalid join date", 400));
+      data.joinDate = join;
+    }
+    if (departments !== undefined) data.departments = toStringArray(departments);
     if (tags !== undefined) data.tags = Array.isArray(tags) ? tags : [];
     if (notes !== undefined) data.notes = notes;
     if (optedOut !== undefined) data.optedOut = Boolean(optedOut);
@@ -94,7 +154,10 @@ const updateCustomer = async (req, res, next) => {
     res.status(200).json({ success: true, data: customer });
   } catch (err) {
     if (err.code === "P2025") return next(new AppError("Customer not found", 404));
-    if (err.code === "P2002") return next(new AppError("Phone or email already in use", 409));
+    if (err.code === "P2002") {
+      const target = err.meta?.target?.join?.(", ") || "field";
+      return next(new AppError(`A customer with this ${target} already exists`, 409));
+    }
     next(err);
   }
 };
@@ -132,11 +195,30 @@ const importCustomers = async (req, res, next) => {
         continue;
       }
 
-      // Parse tags: support "tag1,tag2" or "tag1;tag2"
-      let tags = [];
-      if (row.tags) {
-        const delimiter = row.tags.includes(";") ? ";" : ",";
-        tags = row.tags.split(delimiter).map((t) => t.trim()).filter(Boolean);
+      // Parse tags/departments: support "a,b" or "a;b" (ordered — first = top department)
+      const splitList = (val) => {
+        if (!val) return [];
+        const delimiter = val.includes(";") ? ";" : ",";
+        return val.split(delimiter).map((t) => t.trim()).filter(Boolean);
+      };
+      const tags = splitList(row.tags);
+      const departments = splitList(row.departments);
+
+      // Validate optional demographic fields per row (skip row on bad values)
+      const gender = parseGender(row.gender);
+      if (gender === undefined) {
+        errors.push({ row: rowNum, phone, reason: "Invalid gender (use Male or Female)" });
+        continue;
+      }
+      const dateOfBirth = parseDate(row.date_of_birth || row.dateofbirth || row.dob);
+      if (dateOfBirth === undefined) {
+        errors.push({ row: rowNum, phone, reason: "Invalid date of birth" });
+        continue;
+      }
+      const joinDate = parseDate(row.join_date || row.joindate);
+      if (joinDate === undefined) {
+        errors.push({ row: rowNum, phone, reason: "Invalid join date" });
+        continue;
       }
 
       try {
@@ -145,6 +227,12 @@ const importCustomers = async (req, res, next) => {
             name: row.name?.trim() || null,
             phone,
             email: row.email?.trim() || null,
+            chartNumber: (row.chart_number || row.chartnumber)?.trim() || null,
+            nationality: row.nationality?.trim() || null,
+            gender,
+            dateOfBirth,
+            joinDate,
+            departments,
             tags,
             notes: row.notes?.trim() || null,
           },

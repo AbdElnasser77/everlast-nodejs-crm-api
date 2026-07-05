@@ -75,6 +75,11 @@ enum CampaignRecipientStatus {
   SKIPPED
 }
 
+enum Gender {
+  MALE
+  FEMALE
+}
+
 model User {
   id                    Int            @id @default(autoincrement())
   name                  String?
@@ -92,9 +97,15 @@ model User {
 
 model Customer {
   id                 Int                 @id @default(autoincrement())
+  chartNumber        String?             @unique
   name               String?
   phone              String              @unique
   email              String?             @unique
+  nationality        String?
+  gender             Gender?
+  dateOfBirth        DateTime?           @db.Date
+  joinDate           DateTime?           @db.Date
+  departments        String[]            @default([]) // ordered by rank: index 0 = top department
   tags               String[]            @default([])
   notes              String?
   optedOut           Boolean             @default(false)
