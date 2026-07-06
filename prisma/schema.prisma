@@ -100,7 +100,7 @@ model Customer {
   chartNumber        String?             @unique
   name               String?
   phone              String              @unique
-  email              String?             @unique
+  email              String?
   nationality        String?
   gender             Gender?
   dateOfBirth        DateTime?           @db.Date

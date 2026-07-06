@@ -1,6 +1,28 @@
 const { parse } = require("csv-parse/sync");
+const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const prisma = require("../../config/prisma");
 const AppError = require("../../utils/AppError");
+
+// Validate & normalize a phone to WhatsApp-sendable international format (digits,
+// no '+'). A number that carries its own country code is auto-detected (any
+// country). A bare local number is interpreted using `country` (ISO-2, e.g.
+// "AE"); with "auto" and no code the country is unknowable, so it's flagged.
+// Returns { phone } on success or { error } otherwise.
+function normalizeImportPhone(raw, country) {
+  const s = (raw ?? "").toString().trim();
+  if (!s) return { error: "Missing phone number" };
+  const intl = s.replace(/^00/, "+"); // a leading 00 is the international prefix
+  // A number carrying its own code auto-detects; code-less numbers fall back to
+  // the chosen country, defaulting to UAE ("AE").
+  const useCountry = country && country !== "auto" ? country : "AE";
+  let pn;
+  try { pn = parsePhoneNumberFromString(intl, useCountry); } catch { pn = null; }
+  if (pn && pn.isValid()) {
+    if (pn.getType() === "FIXED_LINE") return { error: "Landline — can't receive WhatsApp" };
+    return { phone: pn.number.replace(/^\+/, "") };
+  }
+  return { error: "Invalid or unmessageable phone number" };
+}
 
 // ─── Patient field parsers ────────────────────────────────────────────────────
 
@@ -8,8 +30,8 @@ const AppError = require("../../utils/AppError");
 function parseGender(value) {
   if (value == null || value === "") return null;
   const v = String(value).trim().toLowerCase();
-  if (v === "male" || v === "m") return "MALE";
-  if (v === "female" || v === "f") return "FEMALE";
+  if (["male", "m", "man", "men", "boy", "mr", "ذكر"].includes(v)) return "MALE";
+  if (["female", "f", "woman", "women", "girl", "mrs", "ms", "miss", "أنثى", "انثى"].includes(v)) return "FEMALE";
   return undefined; // signal invalid
 }
 
@@ -19,6 +41,126 @@ function parseDate(value) {
   const d = new Date(value);
   if (isNaN(d.getTime())) return undefined; // signal invalid
   return d;
+}
+
+// Flexible date parser for imports. format: "auto" | "dmy" | "mdy" | "ymd".
+// Returns a Date, null (empty), or undefined (unparseable). Mirrors lib/customerImport.ts.
+function buildDate(y, mo, d) {
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return undefined;
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return undefined;
+  return dt;
+}
+
+function parseFlexibleDate(value, format = "auto") {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+
+  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/); // year-first
+  if (m) return buildDate(+m[1], +m[2], +m[3]);
+
+  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/); // day/month then year
+  if (m) {
+    const a = +m[1], b = +m[2];
+    let y = +m[3];
+    if (y < 100) y += y < 50 ? 2000 : 1900;
+    let day, month;
+    if (format === "mdy") { month = a; day = b; }
+    else if (format === "dmy") { day = a; month = b; }
+    else if (a > 12 && b <= 12) { day = a; month = b; }
+    else if (b > 12 && a <= 12) { month = a; day = b; }
+    else { day = a; month = b; } // prefer day-first
+    return buildDate(y, month, day);
+  }
+
+  const parsed = new Date(s); // month-name formats
+  if (!isNaN(parsed.getTime())) return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()));
+  return undefined;
+}
+
+// Build a categorized import plan: validate + normalize each row, then split
+// into rows to create vs. duplicates (against DB + within the file). Shared by
+// the dry-run validate endpoint and the real import.
+async function buildImportPlan(rows, dateFormat = "auto", defaultCountry = "") {
+  const splitList = (val) => {
+    if (!val) return [];
+    const delimiter = val.includes(";") ? ";" : ",";
+    return val.split(delimiter).map((t) => t.trim()).filter(Boolean);
+  };
+
+  const invalid = [];
+  const duplicates = [];
+  const candidates = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const rowNum = i + 2; // +2: row 1 is the header
+    const { phone, error: phoneError } = normalizeImportPhone(row.phone, defaultCountry);
+    if (phoneError) { invalid.push({ row: rowNum, phone: row.phone?.trim() || undefined, reason: phoneError }); continue; }
+    const gender = parseGender(row.gender);
+    if (gender === undefined) { invalid.push({ row: rowNum, phone, reason: "Invalid gender (use Male or Female)" }); continue; }
+    const dateOfBirth = parseFlexibleDate(row.date_of_birth || row.dateofbirth || row.dob, dateFormat);
+    if (dateOfBirth === undefined) { invalid.push({ row: rowNum, phone, reason: "Unrecognized date of birth" }); continue; }
+    const joinDate = parseFlexibleDate(row.join_date || row.joindate, dateFormat);
+    if (joinDate === undefined) { invalid.push({ row: rowNum, phone, reason: "Unrecognized join date" }); continue; }
+    const email = row.email?.trim() || null;
+    candidates.push({
+      rowNum, phone, email,
+      data: {
+        name: row.name?.trim() || null,
+        phone, email,
+        chartNumber: (row.chart_number || row.chartnumber)?.trim() || null,
+        nationality: row.nationality?.trim() || null,
+        gender, dateOfBirth, joinDate,
+        departments: splitList(row.departments),
+        tags: splitList(row.tags),
+        notes: row.notes?.trim() || null,
+      },
+    });
+  }
+
+  // Duplicates are determined by mobile (phone) and chart number only.
+  const phones = [...new Set(candidates.map((c) => c.phone))];
+  const charts = [...new Set(candidates.map((c) => c.data.chartNumber).filter(Boolean))];
+  const existing = (phones.length || charts.length)
+    ? await prisma.customer.findMany({
+        where: { OR: [...(phones.length ? [{ phone: { in: phones } }] : []), ...(charts.length ? [{ chartNumber: { in: charts } }] : [])] },
+        select: { phone: true, chartNumber: true },
+      })
+    : [];
+  const existingPhones = new Set(existing.map((e) => e.phone));
+  const existingCharts = new Set(existing.map((e) => e.chartNumber).filter(Boolean));
+
+  const seenPhones = new Set();
+  const seenCharts = new Set();
+  const toCreate = [];
+  for (const c of candidates) {
+    const chart = c.data.chartNumber;
+    if (existingPhones.has(c.phone)) { duplicates.push({ row: c.rowNum, phone: c.phone, reason: "Mobile already exists" }); continue; }
+    if (chart && existingCharts.has(chart)) { duplicates.push({ row: c.rowNum, phone: c.phone, reason: "Chart number already exists" }); continue; }
+    if (seenPhones.has(c.phone)) { duplicates.push({ row: c.rowNum, phone: c.phone, reason: "Duplicate mobile in file" }); continue; }
+    if (chart && seenCharts.has(chart)) { duplicates.push({ row: c.rowNum, phone: c.phone, reason: "Duplicate chart number in file" }); continue; }
+    seenPhones.add(c.phone);
+    if (chart) seenCharts.add(chart);
+    toCreate.push(c.data);
+  }
+
+  return { total: rows.length, invalid, duplicates, toCreate };
+}
+
+// Parse a CSV upload into row objects (shared by validate + import).
+function parseUpload(req) {
+  if (!req.file) throw new AppError("CSV file is required", 400);
+  let rows;
+  try {
+    rows = parse(req.file.buffer, { columns: true, skip_empty_lines: true, trim: true, bom: true });
+  } catch {
+    throw new AppError("Invalid CSV format", 400);
+  }
+  if (rows.length === 0) throw new AppError("CSV file is empty", 400);
+  if (rows.length > 20000) throw new AppError("CSV cannot exceed 20000 rows per import", 400);
+  return rows;
 }
 
 // Coerce departments/tags into a trimmed string array.
@@ -44,7 +186,9 @@ const getAllCustomers = async (req, res, next) => {
     }
 
     const [customers, total] = await Promise.all([
-      prisma.customer.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: limit }),
+      // id tiebreaker keeps pagination stable when many rows share a createdAt
+      // (e.g. a bulk import), otherwise skip/take can repeat or drop rows.
+      prisma.customer.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip, take: limit }),
       prisma.customer.count({ where }),
     ]);
 
@@ -162,94 +306,47 @@ const updateCustomer = async (req, res, next) => {
   }
 };
 
+// Dry-run: validate & categorize the upload without writing anything.
+const validateImport = async (req, res, next) => {
+  try {
+    const rows = parseUpload(req);
+    const plan = await buildImportPlan(rows, req.body?.dateFormat, req.body?.defaultCountry);
+    res.status(200).json({
+      success: true,
+      data: {
+        total: plan.total,
+        valid: plan.toCreate.length,
+        duplicates: plan.duplicates,
+        invalid: plan.invalid,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Real import: categorize, then bulk-insert the valid, non-duplicate rows.
 const importCustomers = async (req, res, next) => {
   try {
-    if (!req.file) return next(new AppError("CSV file is required", 400));
-
-    let rows;
-    try {
-      rows = parse(req.file.buffer, {
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-        bom: true, // handle Excel-exported CSVs with BOM
-      });
-    } catch {
-      return next(new AppError("Invalid CSV format", 400));
-    }
-
-    if (rows.length === 0) return next(new AppError("CSV file is empty", 400));
-    if (rows.length > 5000) return next(new AppError("CSV cannot exceed 5000 rows per import", 400));
+    const rows = parseUpload(req);
+    const plan = await buildImportPlan(rows, req.body?.dateFormat, req.body?.defaultCountry);
 
     let created = 0;
-    let skipped = 0;
-    const errors = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const rowNum = i + 2; // +2 because row 1 is the header
-
-      const phone = row.phone?.trim();
-      if (!phone) {
-        errors.push({ row: rowNum, reason: "Missing phone number" });
-        continue;
-      }
-
-      // Parse tags/departments: support "a,b" or "a;b" (ordered — first = top department)
-      const splitList = (val) => {
-        if (!val) return [];
-        const delimiter = val.includes(";") ? ";" : ",";
-        return val.split(delimiter).map((t) => t.trim()).filter(Boolean);
-      };
-      const tags = splitList(row.tags);
-      const departments = splitList(row.departments);
-
-      // Validate optional demographic fields per row (skip row on bad values)
-      const gender = parseGender(row.gender);
-      if (gender === undefined) {
-        errors.push({ row: rowNum, phone, reason: "Invalid gender (use Male or Female)" });
-        continue;
-      }
-      const dateOfBirth = parseDate(row.date_of_birth || row.dateofbirth || row.dob);
-      if (dateOfBirth === undefined) {
-        errors.push({ row: rowNum, phone, reason: "Invalid date of birth" });
-        continue;
-      }
-      const joinDate = parseDate(row.join_date || row.joindate);
-      if (joinDate === undefined) {
-        errors.push({ row: rowNum, phone, reason: "Invalid join date" });
-        continue;
-      }
-
-      try {
-        await prisma.customer.create({
-          data: {
-            name: row.name?.trim() || null,
-            phone,
-            email: row.email?.trim() || null,
-            chartNumber: (row.chart_number || row.chartnumber)?.trim() || null,
-            nationality: row.nationality?.trim() || null,
-            gender,
-            dateOfBirth,
-            joinDate,
-            departments,
-            tags,
-            notes: row.notes?.trim() || null,
-          },
-        });
-        created++;
-      } catch (err) {
-        if (err.code === "P2002") {
-          skipped++; // duplicate phone or email — skip silently
-        } else {
-          errors.push({ row: rowNum, phone, reason: err.message });
-        }
-      }
+    if (plan.toCreate.length > 0) {
+      const result = await prisma.customer.createMany({ data: plan.toCreate, skipDuplicates: true });
+      created = result.count;
     }
+    const otherSkipped = plan.toCreate.length - created; // e.g. chart-number conflicts
 
     res.status(200).json({
       success: true,
-      data: { created, skipped, errors, total: rows.length },
+      data: {
+        total: plan.total,
+        created,
+        skipped: plan.duplicates.length + otherSkipped,
+        duplicates: plan.duplicates,
+        errors: plan.invalid,
+      },
     });
   } catch (err) {
     next(err);
@@ -298,4 +395,4 @@ const bulkDeleteCustomers = async (req, res, next) => {
   }
 };
 
-module.exports = { getAllCustomers, getCustomerById, createCustomer, updateCustomer, importCustomers, deleteCustomer, bulkDeleteCustomers };
+module.exports = { getAllCustomers, getCustomerById, createCustomer, updateCustomer, validateImport, importCustomers, deleteCustomer, bulkDeleteCustomers };
