@@ -1,21 +1,6 @@
 const cloudinary = require("../../utils/cloudinary");
 const AppError = require("../../utils/AppError");
-
-// Map MIME type to Cloudinary resource_type
-const getResourceType = (mimetype) => {
-  if (mimetype.startsWith("image/")) return "image";
-  if (mimetype.startsWith("video/")) return "video";
-  if (mimetype.startsWith("audio/")) return "video"; // Cloudinary uses "video" for audio
-  return "raw"; // documents (pdf, docx, etc.)
-};
-
-// Map MIME type to WhatsApp messageType
-const getMessageType = (mimetype) => {
-  if (mimetype.startsWith("image/")) return "IMAGE";
-  if (mimetype.startsWith("video/")) return "VIDEO";
-  if (mimetype.startsWith("audio/")) return "AUDIO";
-  return "DOCUMENT";
-};
+const { getResourceType, getMessageType } = require("../../utils/mediaHelpers");
 
 const uploadMedia = (req, res, next) => {
   if (!req.file) return next(new AppError("No file provided", 400));

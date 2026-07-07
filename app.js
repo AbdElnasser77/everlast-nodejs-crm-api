@@ -56,9 +56,11 @@ if (process.env.NODE_ENV !== "production") {
 app.use("/api/auth", authLimiter, require("./modules/auth/auth.routes"));
 app.use("/api/users", require("./modules/users/user.routes"));
 app.use("/api/customers", require("./modules/customers/customer.routes"));
+app.use("/api/lists", require("./modules/lists/list.routes"));
 app.use("/api/conversations", require("./modules/conversations/conversation.routes"));
 app.use("/api/messages", require("./modules/messages/message.routes"));
 app.use("/api/media", require("./modules/media/media.routes"));
+app.use("/api/media-library", require("./modules/media-library/mediaLibrary.routes"));
 app.use("/api/webhooks", webhookLimiter, require("./modules/webhooks/webhook.routes"));
 app.use("/api/audit", require("./modules/audit/audit.routes"));
 app.use("/api/stats", require("./modules/stats/stats.routes"));

@@ -7,22 +7,124 @@ const { toMetaPositionalBody, buildTemplateParams, resolveNamedVars } = require(
 
 const VALID_CATEGORIES = ["GENERAL", "RE_ENGAGEMENT", "CAMPAIGN"];
 const VALID_STATUSES = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"];
+const HEADER_TYPES = ["NONE", "TEXT", "IMAGE", "VIDEO", "DOCUMENT"];
+const BUTTON_TYPES = ["QUICK_REPLY", "URL", "PHONE_NUMBER"];
+// Meta's own per-message billing category, mapped from this CRM's category —
+// kept in sync with the frontend's cost estimator (campaigns/new/page.tsx).
+const META_TEMPLATE_CATEGORY = { GENERAL: "UTILITY", RE_ENGAGEMENT: "MARKETING", CAMPAIGN: "MARKETING" };
 const WINDOW_MS = 24 * 60 * 60 * 1000;
+const BODY_MAX_LENGTH = 800; // kept in sync with the frontend's LIMITS.body
 const getApiVersion = () => process.env.WHATSAPP_API_VERSION || "v19.0";
+const PLACEHOLDER_RE = /\{\{\s*[a-z0-9_]+\s*\}\}/gi;
 
+// Validate the header type/content combination. Returns the clean triple to
+// persist — {headerType, header, headerMediaUrl} — so switching types never
+// leaves a stale value from the previous type behind.
+function validateHeader(headerType, header, headerMediaUrl) {
+  const type = headerType || "NONE";
+  if (!HEADER_TYPES.includes(type)) {
+    throw new AppError(`Invalid headerType. Must be one of: ${HEADER_TYPES.join(", ")}`, 400);
+  }
+  if (type === "NONE") return { headerType: "NONE", header: null, headerMediaUrl: null };
+  if (type === "TEXT") {
+    const text = (header || "").trim();
+    if (!text) throw new AppError("Header text is required when the header type is Text", 400);
+    if (text.length > 60) throw new AppError("Header text must be 60 characters or fewer", 400);
+    return { headerType: "TEXT", header: text, headerMediaUrl: null };
+  }
+  // IMAGE / VIDEO / DOCUMENT — a sample media URL is required so Meta can
+  // generate the media handle needed for approval.
+  const url = (headerMediaUrl || "").trim();
+  if (!url) throw new AppError(`A sample ${type.toLowerCase()} URL is required for a ${type.toLowerCase()} header`, 400);
+  if (!/^https?:\/\//i.test(url)) throw new AppError("Header media URL must start with http:// or https://", 400);
+  return { headerType: type, header: null, headerMediaUrl: url };
+}
+
+// Validate buttons against WhatsApp's real rules: max 3 total, titles ≤25
+// chars with no placeholders, and Quick Reply buttons can't be mixed with
+// Call/URL buttons — it's one or the other, matching Meta's own constraint.
 const validateButtons = (buttons) => {
   if (!buttons) return null;
   if (!Array.isArray(buttons)) throw new AppError("buttons must be an array", 400);
+  if (buttons.length === 0) return null;
   if (buttons.length > 3) throw new AppError("Maximum 3 buttons allowed", 400);
-  for (const b of buttons) {
-    if (!b.id || !b.title) throw new AppError("Each button must have id and title", 400);
-    if (b.title.length > 20) throw new AppError(`Button title "${b.title}" exceeds 20 characters`, 400);
+
+  const types = new Set();
+  let urlCount = 0;
+  let phoneCount = 0;
+
+  const cleaned = buttons.map((b) => {
+    const title = String(b?.title ?? "").trim();
+    if (!b?.id || !title) throw new AppError("Each button needs an id and a title", 400);
+    if (title.length > 25) throw new AppError(`Button title "${title}" exceeds 25 characters`, 400);
+    if (PLACEHOLDER_RE.test(title)) throw new AppError("Button titles can't contain placeholders", 400);
+
+    const type = b.type || "QUICK_REPLY";
+    if (!BUTTON_TYPES.includes(type)) throw new AppError(`Invalid button type "${type}"`, 400);
+    types.add(type);
+
+    if (type === "PHONE_NUMBER") {
+      phoneCount++;
+      const phoneNumber = String(b.phoneNumber ?? "").trim();
+      if (!phoneNumber) throw new AppError("A phone number is required for a Call Number button", 400);
+      if (!/^\+?[0-9]{7,15}$/.test(phoneNumber)) throw new AppError(`"${phoneNumber}" isn't a valid phone number`, 400);
+      return { id: b.id, type, title, phoneNumber };
+    }
+    if (type === "URL") {
+      urlCount++;
+      const url = String(b.url ?? "").trim();
+      if (!url) throw new AppError("A URL is required for a URL button", 400);
+      if (!/^https?:\/\//i.test(url)) throw new AppError("Button URL must start with http:// or https://", 400);
+      const placeholders = url.match(PLACEHOLDER_RE) || [];
+      if (placeholders.length > 1) throw new AppError("A URL button can have at most 1 placeholder", 400);
+      return { id: b.id, type, title, url };
+    }
+    return { id: b.id, type: "QUICK_REPLY", title };
+  });
+
+  if (types.has("QUICK_REPLY") && types.size > 1) {
+    throw new AppError("Buttons can't mix Quick Reply with Call Number/URL buttons — use one or the other", 400);
   }
-  return buttons;
+  if (phoneCount > 1) throw new AppError("Only 1 Call Number button is allowed per template", 400);
+  if (urlCount > 2) throw new AppError("A maximum of 2 URL buttons is allowed per template", 400);
+
+  return cleaned;
 };
 
 const toMetaName = (name) =>
   name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+// Uploads a remote media file to Meta's resumable upload API and returns the
+// media "handle" needed to submit a template with an IMAGE/VIDEO/DOCUMENT
+// header for approval. Requires WHATSAPP_APP_ID (separate from the WABA id).
+async function uploadHeaderMediaHandle(mediaUrl) {
+  const appId = process.env.WHATSAPP_APP_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!appId) {
+    throw new AppError("WHATSAPP_APP_ID is not configured — required to submit templates with an image/video/document header", 500);
+  }
+
+  const file = await axios.get(mediaUrl, { responseType: "arraybuffer" });
+  const fileBuffer = Buffer.from(file.data);
+  const contentType = file.headers["content-type"] || "application/octet-stream";
+
+  const session = await axios.post(
+    `https://graph.facebook.com/${getApiVersion()}/${appId}/uploads`,
+    null,
+    { params: { file_length: fileBuffer.length, file_type: contentType, access_token: accessToken } },
+  );
+  const uploadSessionId = session.data?.id;
+  if (!uploadSessionId) throw new AppError("Meta did not return an upload session id", 502);
+
+  const uploaded = await axios.post(
+    `https://graph.facebook.com/${getApiVersion()}/${uploadSessionId}`,
+    fileBuffer,
+    { headers: { Authorization: `OAuth ${accessToken}`, file_offset: "0", "Content-Type": contentType } },
+  );
+  const handle = uploaded.data?.h;
+  if (!handle) throw new AppError("Meta did not return a media handle", 502);
+  return handle;
+}
 
 const getTemplates = async (req, res, next) => {
   try {
@@ -53,13 +155,15 @@ const getTemplates = async (req, res, next) => {
 
 const createTemplate = async (req, res, next) => {
   try {
-    const { name, category, language, header, body, footer, buttons } = req.body;
+    const { name, category, language, headerType, header, headerMediaUrl, body, footer, buttons } = req.body;
     if (!name) return next(new AppError("name is required", 400));
     if (!body) return next(new AppError("body is required", 400));
+    if (body.length > BODY_MAX_LENGTH) return next(new AppError(`Body must be ${BODY_MAX_LENGTH} characters or fewer`, 400));
     if (category && !VALID_CATEGORIES.includes(category)) {
       return next(new AppError(`Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}`, 400));
     }
 
+    const headerFields = validateHeader(headerType, header, headerMediaUrl);
     const validatedButtons = validateButtons(buttons);
 
     const template = await prisma.template.create({
@@ -67,7 +171,7 @@ const createTemplate = async (req, res, next) => {
         name,
         category: category || "GENERAL",
         language: language || "en_US",
-        header: header || null,
+        ...headerFields,
         body,
         footer: footer || null,
         buttons: validatedButtons,
@@ -90,11 +194,15 @@ const updateTemplate = async (req, res, next) => {
       return next(new AppError("Cannot edit a SUBMITTED or APPROVED template", 400));
     }
 
-    const { name, category, language, header, body, footer, buttons } = req.body;
+    const { name, category, language, headerType, header, headerMediaUrl, body, footer, buttons } = req.body;
     if (category && !VALID_CATEGORIES.includes(category)) {
       return next(new AppError(`Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}`, 400));
     }
+    if (body !== undefined && body.length > BODY_MAX_LENGTH) {
+      return next(new AppError(`Body must be ${BODY_MAX_LENGTH} characters or fewer`, 400));
+    }
 
+    const headerFields = headerType !== undefined ? validateHeader(headerType, header, headerMediaUrl) : null;
     const validatedButtons = buttons !== undefined ? validateButtons(buttons) : existing.buttons;
 
     const template = await prisma.template.update({
@@ -103,7 +211,7 @@ const updateTemplate = async (req, res, next) => {
         ...(name && { name }),
         ...(category && { category }),
         ...(language && { language }),
-        header: header !== undefined ? header : existing.header,
+        ...(headerFields || {}),
         ...(body && { body }),
         footer: footer !== undefined ? footer : existing.footer,
         buttons: validatedButtons,
@@ -150,8 +258,18 @@ const submitForApproval = async (req, res, next) => {
 
     // Build Meta components
     const components = [];
-    if (template.header) {
+    if (template.headerType === "TEXT" && template.header) {
       components.push({ type: "HEADER", format: "TEXT", text: template.header });
+    } else if (["IMAGE", "VIDEO", "DOCUMENT"].includes(template.headerType) && template.headerMediaUrl) {
+      let handle;
+      try {
+        handle = await uploadHeaderMediaHandle(template.headerMediaUrl);
+      } catch (uploadErr) {
+        if (uploadErr instanceof AppError) return next(uploadErr);
+        console.error("Header media upload failed:", uploadErr.response?.data || uploadErr.message);
+        return next(new AppError("Failed to upload header media to Meta", 502));
+      }
+      components.push({ type: "HEADER", format: template.headerType, example: { header_handle: [handle] } });
     }
 
     // Convert named placeholders to Meta positional {{1}},{{2}} (by order of
@@ -171,7 +289,17 @@ const submitForApproval = async (req, res, next) => {
     if (template.buttons && Array.isArray(template.buttons) && template.buttons.length > 0) {
       components.push({
         type: "BUTTONS",
-        buttons: template.buttons.map((b) => ({ type: "QUICK_REPLY", text: b.title })),
+        buttons: template.buttons.map((b) => {
+          if (b.type === "PHONE_NUMBER") return { type: "PHONE_NUMBER", text: b.title, phone_number: b.phoneNumber };
+          if (b.type === "URL") {
+            const btn = { type: "URL", text: b.title, url: b.url };
+            if (PLACEHOLDER_RE.test(b.url)) {
+              btn.example = [b.url.replace(PLACEHOLDER_RE, "sample")];
+            }
+            return btn;
+          }
+          return { type: "QUICK_REPLY", text: b.title };
+        }),
       });
     }
 
@@ -182,7 +310,7 @@ const submitForApproval = async (req, res, next) => {
         {
           name: metaName,
           language: template.language,
-          category: "MARKETING",
+          category: META_TEMPLATE_CATEGORY[template.category] || "MARKETING",
           components,
         },
         { headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}` } },
@@ -296,9 +424,13 @@ const sendTemplate = async (req, res, next) => {
     const messageType = needsMetaTemplate ? "TEMPLATE" : (hasButtons ? "INTERACTIVE" : "TEXT");
 
     // Store full template structure as JSON so the frontend can render header/body/footer/buttons
-    const resolvedHeader = template.header ? resolveNamedVars(template.header, conversation.customer, req.user) : null;
+    const resolvedHeader = template.headerType === "TEXT" && template.header
+      ? resolveNamedVars(template.header, conversation.customer, req.user)
+      : null;
     const templateContent = JSON.stringify({
+      headerType: template.headerType,
       header: resolvedHeader || undefined,
+      headerMediaUrl: template.headerMediaUrl || undefined,
       body: resolvedBody,
       footer: template.footer || undefined,
       buttons: hasButtons ? template.buttons : undefined,
@@ -324,7 +456,9 @@ const sendTemplate = async (req, res, next) => {
         content: resolvedBody,
         messageType,
         buttons: hasButtons ? template.buttons : null,
-        header: template.header || null,
+        headerType: template.headerType,
+        header: resolvedHeader,
+        headerMediaUrl: template.headerMediaUrl || null,
         footer: template.footer || null,
         templateName: template.metaTemplateName,
         language: template.language,
