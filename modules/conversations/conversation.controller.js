@@ -15,6 +15,17 @@ const getAllConversations = async (req, res, next) => {
     if (req.query.status) where.status = req.query.status;
     if (req.query.assignedAgentId) where.assignedAgentId = parseInt(req.query.assignedAgentId);
     if (req.query.lastSenderType) where.lastSenderType = req.query.lastSenderType;
+    // Server-side search — the sidebar only ever loads a page at a time, so
+    // filtering client-side would miss any customer outside that window.
+    if (req.query.search) {
+      const search = String(req.query.search).trim();
+      where.customer = {
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { phone: { contains: search } },
+        ],
+      };
+    }
 
     const [conversations, total] = await Promise.all([
       prisma.conversation.findMany({
@@ -23,7 +34,11 @@ const getAllConversations = async (req, res, next) => {
           customer: { select: { name: true, phone: true } },
           assignedAgent: { select: { id: true, username: true } },
         },
-        orderBy: { lastMessageAt: "desc" },
+        // Postgres puts NULL first in a plain DESC sort — without `nulls:
+        // "last"`, every conversation that never actually got a message
+        // (e.g. a campaign recipient whose send failed before ever writing
+        // lastMessageAt) would rank above every real, active conversation.
+        orderBy: { lastMessageAt: { sort: "desc", nulls: "last" } },
         skip,
         take: limit,
       }),
@@ -55,7 +70,7 @@ const getConversationMessages = async (req, res, next) => {
         where: { conversationId },
         include: {
           quotedMessage: {
-            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true, deletedAt: true },
           },
         },
         orderBy: { createdAt: "desc" },

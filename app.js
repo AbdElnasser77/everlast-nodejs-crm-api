@@ -66,6 +66,7 @@ app.use("/api/audit", require("./modules/audit/audit.routes"));
 app.use("/api/stats", require("./modules/stats/stats.routes"));
 app.use("/api/templates", require("./modules/templates/template.routes"));
 app.use("/api/campaigns", require("./modules/campaigns/campaign.routes"));
+app.use("/api/whatsapp", require("./modules/whatsapp-status/whatsappStatus.routes"));
 
 app.use(errorHandler);
 

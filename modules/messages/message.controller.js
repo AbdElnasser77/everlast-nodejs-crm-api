@@ -55,7 +55,7 @@ const sendMessage = async (req, res, next) => {
       },
       include: {
         quotedMessage: {
-          select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+          select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true, deletedAt: true },
         },
       },
     });
@@ -73,7 +73,7 @@ const sendMessage = async (req, res, next) => {
         data: { whatsappMessageId, status: "SENT" },
         include: {
           quotedMessage: {
-            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true, deletedAt: true },
           },
         },
       });
@@ -85,7 +85,7 @@ const sendMessage = async (req, res, next) => {
         data: { status: "FAILED" },
         include: {
           quotedMessage: {
-            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true },
+            select: { id: true, content: true, messageType: true, senderType: true, mediaUrl: true, deletedAt: true },
           },
         },
       });
@@ -193,4 +193,37 @@ const getMessageMedia = async (req, res, next) => {
   }
 };
 
-module.exports = { sendMessage, searchMessages, getMessageMedia };
+// Soft-delete only — WhatsApp's Cloud API has no "unsend" endpoint, so this
+// removes the message from the CRM's view but cannot recall it from the
+// customer's phone. Agents may only delete their own sent messages; customer
+// messages are never eligible, regardless of who's asking.
+const deleteMessage = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id);
+    const message = await prisma.message.findUnique({
+      where: { id },
+      select: { id: true, conversationId: true, senderType: true, senderId: true, deletedAt: true },
+    });
+    if (!message) return next(new AppError("Message not found", 404));
+    if (message.senderType !== "AGENT") {
+      return next(new AppError("Customer messages cannot be deleted", 403));
+    }
+    if (String(message.senderId) !== String(req.user.id)) {
+      return next(new AppError("You can only delete your own messages", 403));
+    }
+
+    if (!message.deletedAt) {
+      await prisma.message.update({
+        where: { id },
+        data: { deletedAt: new Date(), content: "", mediaUrl: null, mediaId: null },
+      });
+      getIO().emit("message.deleted", { messageId: id, conversationId: message.conversationId });
+    }
+
+    res.status(200).json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { sendMessage, searchMessages, getMessageMedia, deleteMessage };

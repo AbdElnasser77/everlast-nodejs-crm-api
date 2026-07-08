@@ -210,6 +210,7 @@ model Message {
   quotedMessageId   Int?
   quotedMessage     Message?       @relation("QuotedMessages", fields: [quotedMessageId], references: [id])
   quotingMessages   Message[]      @relation("QuotedMessages")
+  deletedAt         DateTime?
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 

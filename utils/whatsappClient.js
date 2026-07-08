@@ -136,4 +136,4 @@ const sendWhatsAppMessage = async ({
   return { whatsappMessageId };
 };
 
-module.exports = { sendWhatsAppMessage };
+module.exports = { sendWhatsAppMessage, getApiVersion };
