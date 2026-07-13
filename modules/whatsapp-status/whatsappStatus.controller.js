@@ -58,7 +58,12 @@ const getPhoneNumberStatus = async (req, res, next) => {
   } catch (err) {
     const metaError = err.response?.data?.error;
     if (metaError) {
-      return next(new AppError(`WhatsApp API error: ${metaError.message}`, err.response.status || 502));
+      // Never relay Meta's own status code as-is — Meta returns 401 for an
+      // expired/invalid WhatsApp access token, and the frontend treats ANY
+      // 401 as "your CRM session expired," force-logging the user out. That
+      // would turn a dead WhatsApp token into a false CRM logout. Always
+      // surface this as a distinct upstream-failure status instead.
+      return next(new AppError(`WhatsApp API error: ${metaError.message}`, 502));
     }
     next(err);
   }
@@ -101,7 +106,12 @@ const getAllPhoneNumbers = async (req, res, next) => {
   } catch (err) {
     const metaError = err.response?.data?.error;
     if (metaError) {
-      return next(new AppError(`WhatsApp API error: ${metaError.message}`, err.response.status || 502));
+      // Never relay Meta's own status code as-is — Meta returns 401 for an
+      // expired/invalid WhatsApp access token, and the frontend treats ANY
+      // 401 as "your CRM session expired," force-logging the user out. That
+      // would turn a dead WhatsApp token into a false CRM logout. Always
+      // surface this as a distinct upstream-failure status instead.
+      return next(new AppError(`WhatsApp API error: ${metaError.message}`, 502));
     }
     next(err);
   }
